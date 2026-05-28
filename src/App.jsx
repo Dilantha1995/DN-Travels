@@ -91,6 +91,7 @@ export default function App() {
   const [ratesInfo, setRatesInfo] = useState({ MVR: 15.42, LKR: 300, fetchedAt: null, loading: false });
   const [reportFrom, setReportFrom] = useState("");
   const [reportTo, setReportTo] = useState("");
+  const [rateNonce, setRateNonce] = useState(0); // forces re-render when inline rate changes
 
   // ---- Load persisted data (localStorage) ----
   useEffect(() => {
@@ -569,8 +570,30 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
                   <PriceLine label="Customer pays" value={money(sellPrice, form.currency)} big />
                 </div>
                 {form.currency !== "USD" && (
-                  <div style={styles.fxNote}>
-                    Converted at {CURRENCIES[form.currency].rate} {form.currency}/USD — adjust the rate in code if needed.
+                  <div style={styles.fxEdit}>
+                    <label style={styles.fxLabel}>Rate: 1 USD =</label>
+                    <input
+                      style={styles.fxInput}
+                      value={RATES[form.currency]}
+                      onChange={(e) => {
+                        const v = e.target.value.replace(/[^0-9.]/g, "");
+                        RATES[form.currency] = parseFloat(v) || 0;
+                        setRateNonce((n) => n + 1);
+                      }}
+                    />
+                    <span style={styles.fxCur}>{form.currency}</span>
+                    <button
+                      style={styles.fxRefresh}
+                      title="Fetch live rate"
+                      onClick={async () => { await fetchRates(); setRateNonce((n) => n + 1); }}
+                    >
+                      <RefreshCw size={13} /> Live
+                    </button>
+                  </div>
+                )}
+                {form.currency !== "USD" && (
+                  <div style={styles.fxHint}>
+                    Edit the rate above for this booking, or set a default in Settings.
                   </div>
                 )}
               </div>
@@ -1139,7 +1162,12 @@ const styles = {
   priceBreak: { background: "#f5f9fc", borderRadius: 12, padding: "14px 16px", marginTop: 6 },
   priceLine: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0" },
   priceDivider: { height: 1, background: "#dde9f2", margin: "8px 0" },
-  fxNote: { fontSize: 11.5, color: "#8499aa", marginTop: 10, lineHeight: 1.4 },
+  fxEdit: { display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" },
+  fxLabel: { fontSize: 12.5, fontWeight: 600, color: "#5b7185" },
+  fxInput: { width: 90, padding: "7px 10px", border: "1px solid #d9e6f0", borderRadius: 8, fontFamily: "Manrope, sans-serif", fontSize: 14, color: NAVY, fontWeight: 700 },
+  fxCur: { fontSize: 13, fontWeight: 700, color: NAVY },
+  fxRefresh: { display: "inline-flex", alignItems: "center", gap: 5, padding: "7px 11px", background: "#eef6fc", border: "1px solid #cfe3f3", borderRadius: 8, color: OCEAN, fontWeight: 600, fontSize: 12, cursor: "pointer" },
+  fxHint: { fontSize: 11.5, color: "#8499aa", marginTop: 8, lineHeight: 1.4 },
   primaryBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "15px", background: NAVY, color: "#fff", border: "none", borderRadius: 12, fontFamily: "Sora, sans-serif", fontWeight: 700, fontSize: 15.5, cursor: "pointer", boxShadow: "0 4px 14px rgba(13,59,102,.22)" },
   ghostBtn: { padding: "11px", background: "transparent", color: "#8499aa", border: "1px solid #d9e6f0", borderRadius: 10, fontWeight: 600, cursor: "pointer" },
   hint: { fontSize: 12, color: "#8499aa", lineHeight: 1.5, textAlign: "center" },
