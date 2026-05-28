@@ -13,6 +13,9 @@ export async function readPdfText(file) {
     const content = await page.getTextContent();
     text += content.items.map((it) => it.str).join(" ") + " ";
   }
+  console.log("=== DN DEBUG: extracted PDF text ===");
+  console.log(text);
+  console.log("=== DN DEBUG: end ===");
   return text;
 }
 
