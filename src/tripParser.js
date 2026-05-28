@@ -13,17 +13,32 @@ export async function readPdfText(file) {
     const content = await page.getTextContent();
     text += content.items.map((it) => it.str).join(" ") + " ";
   }
-  console.log("=== DN DEBUG: extracted PDF text ===");
-  console.log(text);
-  console.log("=== DN DEBUG: end ===");
   return text;
 }
 
+// Send extracted text to our serverless function, which calls Gemini and
+// returns clean structured data. Works for receipt, itinerary, or both.
+export async function aiParse({ receiptText = "", itineraryText = "" }) {
+  const res = await fetch("/api/parse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ receiptText, itineraryText }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch {}
+    throw new Error(`AI parse failed (${res.status}). ${detail}`);
+  }
+  return res.json();
+}
+
 // Collapse ALL whitespace (incl. non-breaking spaces \xa0) to single spaces so
-// parsing never depends on newlines. Also normalize Trip.com's unicode colon (∶).
+// parsing never depends on newlines. Also normalize Trip.com's unicode colon (∶),
+// including when the PDF reader puts spaces around it ("07 ∶ 30" -> "07:30").
 function norm(t) {
   return t
-    .replace(/\u2236/g, ":")     // ∶ -> :
+    .replace(/(\d)\s*[\u2236:]\s*(\d)/g, "$1:$2")  // "07 ∶ 30" / "07 : 30" -> "07:30"
+    .replace(/\u2236/g, ":")     // any remaining ∶ -> :
     .replace(/\u00a0/g, " ")     // non-breaking space -> space
     .replace(/\r/g, "")
     .replace(/\s+/g, " ")
