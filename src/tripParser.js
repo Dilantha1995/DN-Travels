@@ -77,15 +77,21 @@ export function parseItinerary(raw) {
   let m;
   if ((m = t.match(/Booking No\.?\s*([0-9]{6,})/i))) out.tripBookingNo = m[1];
   if ((m = t.match(/E-ticket No\.\s*Airline.*?(\d{3}-\d{6,})/i))) out.eticket = m[1];
+  if ((m = t.match(/Ticket Number:\s*(\d{3}-\d{6,})/i))) out.eticket = out.eticket || m[1];
   if ((m = t.match(/Economy\s+\d{3}-\d{6,}\s+([A-Z0-9]{5,7})/i))) out.airlineRef = m[1].trim();
+  if ((m = t.match(/PNR\)\s*:?\s*([A-Z0-9]{5,7})/i))) out.airlineRef = out.airlineRef || m[1].trim();
+  if ((m = t.match(/Dear\s+(.+?),/i))) out.customerName = m[1].trim();
+  if ((m = t.match(/([\w.+-]+@[\w.-]+\.\w+)/))) {
+    if (!m[1].includes("noreply") && !m[1].includes("trip.com")) out.customerEmail = m[1];
+  }
   if ((m = t.match(/(?:name|^|\s)\s*((?:[A-Z]\s){1,6}[A-Z]?)\(First\s*name\)\s*([A-Z]+)\s*\(Last/i))) {
     out.paxName = m[1].replace(/\s+/g, " ").trim() + " " + m[2].trim();
   }
-  // Newline-independent flight block matcher. Airport fields stop before the
-  // next keyword (Arrival/Airline) so they can't over-grab. Time accepts : or .
-  const re = /Departure\s+(\d{1,2}[:.]\d{2}),\s*([A-Za-z]+\s+\d{1,2}),\s*(\d{4}),\s*(.+?)\s+Arrival\s+(\d{1,2}[:.]\d{2}),\s*([A-Za-z]+\s+\d{1,2}),\s*(\d{4}),\s*(.+?)\s+Airline\s+(.+?)\s+([A-Z]{1,3}\s?\d{2,4})\b/gi;
+
+  // Format A: attached itinerary — "Departure HH:MM, Month D, YYYY, Airport ... Airline FLT"
+  const reA = /Departure\s+(\d{1,2}[:.]\d{2}),\s*([A-Za-z]+\s+\d{1,2}),\s*(\d{4}),\s*(.+?)\s+Arrival\s+(\d{1,2}[:.]\d{2}),\s*([A-Za-z]+\s+\d{1,2}),\s*(\d{4}),\s*(.+?)\s+Airline\s+(.+?)\s+([A-Z]{1,3}\s?\d{2,4})\b/gi;
   let b;
-  while ((b = re.exec(t)) !== null) {
+  while ((b = reA.exec(t)) !== null) {
     const dep = b[4].trim();
     const arr = b[8].trim();
     out.segments.push({
@@ -95,6 +101,30 @@ export function parseItinerary(raw) {
       route: shortRoute(dep) + " - " + shortRoute(arr),
     });
   }
+
+  // Format B (fallback): Gmail confirmation email —
+  // "Departure: Route | Date ... HH:MM CODE Airport  Airline FLT | Class ... HH:MM CODE Airport"
+  if (out.segments.length === 0) {
+    const reHeader = /(?:Departure|Return):\s*(.+?)\s*\|\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})/gi;
+    const headers = [];
+    let h;
+    while ((h = reHeader.exec(t)) !== null) headers.push({ route: h[1].trim(), date: h[2].trim(), index: h.index });
+    const reB = /(\d{1,2}:\d{2})\s+([A-Z]{3})\s+(.+?)\s+([A-Z][A-Za-z]+(?:\s[A-Za-z]+)?)\s+([A-Z]{1,3}\d{2,4})\s*\|\s*([A-Za-z]+).*?\s+(\d{1,2}:\d{2})\s+([A-Z]{3})\s+(.+?)(?=\s+(?:Return|View|D L U N|Modify|$)|\s+\d{1,2}:\d{2}\s+[A-Z]{3})/gi;
+    let s, i = 0;
+    while ((s = reB.exec(t)) !== null) {
+      const dep = s[3].trim();
+      const arr = s[9].trim();
+      const hdr = headers[i] || {};
+      out.segments.push({
+        depTime: s[1], depDate: hdr.date || "", depAirport: dep,
+        arrTime: s[7], arrDate: hdr.date || "", arrAirport: arr,
+        airline: s[4].trim(), flightNo: s[5].trim(), cls: s[6].trim() || "Economy",
+        route: hdr.route || (shortRoute(dep) + " - " + shortRoute(arr)),
+      });
+      i++;
+    }
+  }
+
   return out;
 }
 
@@ -103,12 +133,13 @@ export function mergeParsed(receipt, itinerary) {
   const r = receipt || {};
   const it = itinerary || {};
   const segments = (it.segments && it.segments.length) ? it.segments : [];
+  const email = r.customerEmail || it.customerEmail || "";
   return {
-    customerName: r.customerName || "",
-    customerEmail: (r.customerEmail && !r.customerEmail.includes("*")) ? r.customerEmail : "",
+    customerName: r.customerName || it.customerName || "",
+    customerEmail: (email && !email.includes("*")) ? email : "",
     paxName: it.paxName || r.paxName || "",
     eticket: r.eticket || it.eticket || "",
-    airlineRef: it.airlineRef || "",
+    airlineRef: it.airlineRef || r.airlineRef || "",
     tripComPrice: r.total != null ? String(r.total) : "",
     tripBookingNo: r.tripBookingNo || it.tripBookingNo || "",
     segments,
