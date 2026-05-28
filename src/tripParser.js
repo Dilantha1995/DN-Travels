@@ -16,10 +16,15 @@ export async function readPdfText(file) {
   return text;
 }
 
-// Collapse ALL whitespace to single spaces so parsing never depends on newlines.
-// Also normalize the special unicode colon Trip.com uses (∶ U+2236).
+// Collapse ALL whitespace (incl. non-breaking spaces \xa0) to single spaces so
+// parsing never depends on newlines. Also normalize Trip.com's unicode colon (∶).
 function norm(t) {
-  return t.replace(/\u2236/g, ":").replace(/\r/g, "").replace(/\s+/g, " ").trim();
+  return t
+    .replace(/\u2236/g, ":")     // ∶ -> :
+    .replace(/\u00a0/g, " ")     // non-breaking space -> space
+    .replace(/\r/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function shortRoute(airport) {
@@ -55,11 +60,12 @@ export function parseItinerary(raw) {
   if ((m = t.match(/Booking No\.?\s*([0-9]{6,})/i))) out.tripBookingNo = m[1];
   if ((m = t.match(/E-ticket No\.\s*Airline.*?(\d{3}-\d{6,})/i))) out.eticket = m[1];
   if ((m = t.match(/Economy\s+\d{3}-\d{6,}\s+([A-Z0-9]{5,7})/i))) out.airlineRef = m[1].trim();
-  if ((m = t.match(/([A-Z](?:\s[A-Z])*)\s*\(First\s*name\)\s*([A-Z]+)\s*\(Last/i))) {
+  if ((m = t.match(/(?:name|^|\s)\s*((?:[A-Z]\s){1,6}[A-Z]?)\(First\s*name\)\s*([A-Z]+)\s*\(Last/i))) {
     out.paxName = m[1].replace(/\s+/g, " ").trim() + " " + m[2].trim();
   }
-  // Newline-independent flight block matcher
-  const re = /Departure\s+(\d{1,2}:\d{2}),\s*([A-Za-z]+ \d{1,2}),\s*(\d{4}),\s*(.+?)\s+Arrival\s+(\d{1,2}:\d{2}),\s*([A-Za-z]+ \d{1,2}),\s*(\d{4}),\s*(.+?)\s+Airline\s+(.+?)\s+([A-Z0-9]{2}\s?\d{2,4})/gi;
+  // Newline-independent flight block matcher. Airport fields stop before the
+  // next keyword (Arrival/Airline) so they can't over-grab. Time accepts : or .
+  const re = /Departure\s+(\d{1,2}[:.]\d{2}),\s*([A-Za-z]+\s+\d{1,2}),\s*(\d{4}),\s*(.+?)\s+Arrival\s+(\d{1,2}[:.]\d{2}),\s*([A-Za-z]+\s+\d{1,2}),\s*(\d{4}),\s*(.+?)\s+Airline\s+(.+?)\s+([A-Z]{1,3}\s?\d{2,4})\b/gi;
   let b;
   while ((b = re.exec(t)) !== null) {
     const dep = b[4].trim();
