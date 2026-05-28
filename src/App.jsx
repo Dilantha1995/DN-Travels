@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Plane, Plus, History, Download, Printer, Trash2, FileText,
-  X, Check, Compass, Search, ChevronRight, RefreshCw, Edit3
+  X, Check, Compass, Search, ChevronRight, RefreshCw, Edit3,
+  Upload, FileUp, Loader2
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import { readPdfText, parseReceipt, parseItinerary, mergeParsed } from "./tripParser";
 
 // ---------- Branding ----------
 const NAVY = "#0d3b66";
@@ -68,6 +70,8 @@ export default function App() {
   const [docType, setDocType] = useState("invoice"); // invoice | itinerary
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState(null);
 
   // ---- Load persisted data (localStorage) ----
   useEffect(() => {
@@ -95,6 +99,60 @@ export default function App() {
   const basePrice = parseFloat(form.tripComPrice) || 0;
   const sellPrice = basePrice * (1 + MARKUP);
   const margin = sellPrice - basePrice;
+
+  // ---- Form field updates ----
+  // ---- Import Trip.com PDFs ----
+  const handleImport = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      let receipt = null, itinerary = null;
+      for (const file of files) {
+        const text = await readPdfText(file);
+        const lower = text.toLowerCase();
+        // Decide which doc this is by content
+        if (/flight information|baggage allowance|departure/i.test(text) && /first\s*name|last\s*name/i.test(text)) {
+          itinerary = parseItinerary(text);
+        } else if (/receipt|price summary|contact name/i.test(text)) {
+          receipt = parseReceipt(text);
+        } else {
+          // fallback: try both, keep whichever found segments/price
+          const asItin = parseItinerary(text);
+          const asRcpt = parseReceipt(text);
+          if (asItin.segments.length) itinerary = asItin;
+          if (asRcpt.total != null) receipt = asRcpt;
+        }
+      }
+      const merged = mergeParsed(receipt, itinerary);
+      setForm((f) => ({
+        ...f,
+        customerName: merged.customerName || f.customerName,
+        customerEmail: merged.customerEmail || f.customerEmail,
+        paxName: merged.paxName || f.paxName,
+        eticket: merged.eticket || f.eticket,
+        airlineRef: merged.airlineRef || f.airlineRef,
+        tripComPrice: merged.tripComPrice || f.tripComPrice,
+        segments: merged.segments.length ? merged.segments : f.segments,
+      }));
+      const found = [];
+      if (merged.paxName) found.push("passenger");
+      if (merged.segments.length) found.push(`${merged.segments.length} flight(s)`);
+      if (merged.tripComPrice) found.push("price");
+      setImportMsg({
+        ok: true,
+        text: found.length
+          ? `Imported: ${found.join(", ")}. Please review before issuing.`
+          : "Files read, but no recognizable fields found. Check the format or enter manually.",
+      });
+    } catch (e) {
+      console.error(e);
+      setImportMsg({ ok: false, text: "Couldn't read the PDF(s). Make sure they're the original Trip.com files." });
+    } finally {
+      setImporting(false);
+    }
+  };
 
   // ---- Form field updates ----
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -271,6 +329,33 @@ export default function App() {
               <SectionTitle icon={<Edit3 size={16} />}>
                 {editingId ? "Edit Booking" : "Issue New Ticket"}
               </SectionTitle>
+
+              <div style={styles.importBox}>
+                <div style={styles.importHead}>
+                  <FileUp size={18} color={OCEAN} />
+                  <div>
+                    <div style={styles.importTitle}>Auto-fill from Trip.com</div>
+                    <div style={styles.importSub}>Upload the Receipt + Itinerary PDFs</div>
+                  </div>
+                </div>
+                <label style={styles.importBtn}>
+                  {importing ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
+                  {importing ? "Reading…" : "Choose PDF files"}
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    multiple
+                    style={{ display: "none" }}
+                    disabled={importing}
+                    onChange={(e) => handleImport(e.target.files)}
+                  />
+                </label>
+                {importMsg && (
+                  <div style={{ ...styles.importMsg, color: importMsg.ok ? "#1a7a4c" : "#c0392b" }}>
+                    {importMsg.ok ? <Check size={14} /> : <X size={14} />} {importMsg.text}
+                  </div>
+                )}
+              </div>
 
               <Group label="Customer Details">
                 <Field label="Customer Name *" value={form.customerName} onChange={(v) => setField("customerName", v)} placeholder="Full name" />
@@ -716,6 +801,12 @@ const styles = {
   card: { background: "#fff", border: "1px solid #e3edf5", borderRadius: 16, padding: 22, boxShadow: "0 1px 3px rgba(13,59,102,.04)" },
   sectionTitle: { display: "flex", alignItems: "center", gap: 8, fontFamily: "Sora, sans-serif", fontWeight: 700, fontSize: 16, color: NAVY, marginBottom: 18 },
   group: { marginBottom: 20 },
+  importBox: { background: "linear-gradient(135deg,#eef6fc,#f5f9fc)", border: `1.5px dashed ${SKY}`, borderRadius: 14, padding: 16, marginBottom: 22 },
+  importHead: { display: "flex", alignItems: "center", gap: 11, marginBottom: 12 },
+  importTitle: { fontFamily: "Sora, sans-serif", fontWeight: 700, fontSize: 14.5, color: NAVY },
+  importSub: { fontSize: 12, color: "#5b7185", marginTop: 1 },
+  importBtn: { display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 18px", background: OCEAN, color: "#fff", borderRadius: 10, fontWeight: 600, fontSize: 13.5, cursor: "pointer", border: "none" },
+  importMsg: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600, marginTop: 11, lineHeight: 1.4 },
   groupLabel: { fontSize: 11.5, fontWeight: 700, color: OCEAN, textTransform: "uppercase", letterSpacing: .6, marginBottom: 10 },
   row: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
   field: { marginBottom: 12 },
