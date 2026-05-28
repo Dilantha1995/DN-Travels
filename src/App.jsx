@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Plane, Plus, History, Download, Printer, Trash2, FileText,
   X, Check, Compass, Search, ChevronRight, RefreshCw, Edit3,
-  Upload, FileUp, Loader2
+  Upload, FileUp, Loader2, Mail, Settings, BarChart3
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { readPdfText, parseReceipt, parseItinerary, mergeParsed } from "./tripParser";
@@ -14,10 +14,13 @@ const SKY = "#3f9fe0";
 const PAPER = "#f5f8fb";
 
 const CURRENCIES = {
-  USD: { symbol: "$", label: "USD", rate: 1 },
-  MVR: { symbol: "MVR", label: "MVR", rate: 15.42 },     // editable below
-  LKR: { symbol: "LKR", label: "LKR", rate: 300 },        // editable below
+  USD: { symbol: "$", label: "USD" },
+  MVR: { symbol: "MVR", label: "MVR" },
+  LKR: { symbol: "LKR", label: "LKR" },
 };
+
+// Live rates (USD -> currency). Updated at runtime from the API or manual override.
+const RATES = { USD: 1, MVR: 15.42, LKR: 300 };
 
 const MARKUP = 0.05; // 5%
 
@@ -32,10 +35,10 @@ function genBookingRef(seq) {
 }
 
 function money(amount, cur) {
-  const c = CURRENCIES[cur];
-  const val = (amount * c.rate);
+  const rate = RATES[cur] || 1;
+  const val = amount * rate;
   const fixed = val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return cur === "USD" ? `${c.symbol}${fixed}` : `${c.symbol} ${fixed}`;
+  return cur === "USD" ? `${CURRENCIES[cur].symbol}${fixed}` : `${CURRENCIES[cur].symbol} ${fixed}`;
 }
 
 const blankSegment = () => ({
@@ -58,6 +61,18 @@ const blankForm = () => ({
   notes: "",
 });
 
+const defaultSettings = () => ({
+  companyName: "DN TRAVELS",
+  tagline: "Your Maldivian Connection",
+  email: "info@dntravels.mv",
+  phone: "",
+  address: "Malé, Republic of Maldives",
+  website: "",
+  ratesMVR: "15.42",
+  ratesLKR: "300",
+  autoRates: true,
+});
+
 // ============================================================
 export default function App() {
   const [tab, setTab] = useState("new");        // new | history
@@ -72,18 +87,61 @@ export default function App() {
   const [editingId, setEditingId] = useState(null);
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState(null);
+  const [settings, setSettings] = useState(defaultSettings());
+  const [ratesInfo, setRatesInfo] = useState({ MVR: 15.42, LKR: 300, fetchedAt: null, loading: false });
+  const [reportFrom, setReportFrom] = useState("");
+  const [reportTo, setReportTo] = useState("");
 
   // ---- Load persisted data (localStorage) ----
   useEffect(() => {
+    let loadedSettings = defaultSettings();
     try {
       const r = localStorage.getItem("dn_records");
       if (r) setRecords(JSON.parse(r));
       const s = localStorage.getItem("dn_seq");
       if (s) setSeq(parseInt(s, 10));
+      const st = localStorage.getItem("dn_settings");
+      if (st) { loadedSettings = { ...loadedSettings, ...JSON.parse(st) }; setSettings(loadedSettings); }
     } catch (e) {
       console.error("Load error", e);
     }
+    DOC_SETTINGS = loadedSettings;
+    // apply saved manual rates immediately
+    RATES.MVR = parseFloat(loadedSettings.ratesMVR) || RATES.MVR;
+    RATES.LKR = parseFloat(loadedSettings.ratesLKR) || RATES.LKR;
+    setRatesInfo((ri) => ({ ...ri, MVR: RATES.MVR, LKR: RATES.LKR }));
+    // fetch live rates if auto is on
+    if (loadedSettings.autoRates) fetchRates();
     setLoading(false);
+  }, []);
+
+  // ---- Fetch live exchange rates (free, no key) ----
+  const fetchRates = useCallback(async () => {
+    setRatesInfo((ri) => ({ ...ri, loading: true }));
+    try {
+      const res = await fetch("https://open.er-api.com/v6/latest/USD");
+      const data = await res.json();
+      if (data && data.rates && data.rates.MVR && data.rates.LKR) {
+        RATES.MVR = data.rates.MVR;
+        RATES.LKR = data.rates.LKR;
+        setRatesInfo({ MVR: data.rates.MVR, LKR: data.rates.LKR, fetchedAt: new Date(), loading: false });
+        setSettings((s) => ({ ...s, ratesMVR: data.rates.MVR.toFixed(2), ratesLKR: data.rates.LKR.toFixed(2) }));
+      } else {
+        setRatesInfo((ri) => ({ ...ri, loading: false }));
+      }
+    } catch (e) {
+      console.error("Rate fetch failed", e);
+      setRatesInfo((ri) => ({ ...ri, loading: false }));
+    }
+  }, []);
+
+  const saveSettings = useCallback((newSettings) => {
+    setSettings(newSettings);
+    DOC_SETTINGS = newSettings;
+    RATES.MVR = parseFloat(newSettings.ratesMVR) || RATES.MVR;
+    RATES.LKR = parseFloat(newSettings.ratesLKR) || RATES.LKR;
+    setRatesInfo((ri) => ({ ...ri, MVR: RATES.MVR, LKR: RATES.LKR }));
+    try { localStorage.setItem("dn_settings", JSON.stringify(newSettings)); } catch (e) { console.error(e); }
   }, []);
 
   const persist = useCallback((newRecords, newSeq) => {
@@ -283,6 +341,58 @@ export default function App() {
 
   const activeRecord = viewing || saved;
 
+  // ---- Compose customer email (opens Gmail with body prefilled) ----
+  const emailToCustomer = (rec) => {
+    const co = settings.companyName || "DN Travels";
+    const segLines = rec.segments.map((s) => {
+      const route = s.route || `${s.depAirport} → ${s.arrAirport}`;
+      return `• ${route} | ${s.depDate}\n   ${s.depTime}  ${s.depAirport}\n   ${s.airline} ${s.flightNo} | ${s.cls}\n   ${s.arrTime}  ${s.arrAirport}`;
+    }).join("\n\n");
+
+    const subject = `Flight Booking Confirmed: ${rec.segments.map((s) => s.route || "").join(", ")}`;
+    const body =
+`Dear ${rec.customerName || "Customer"},
+
+Thank you for choosing ${co}. Your flight(s) have been booked successfully! Please see your itinerary and e-receipt attached to this email.
+
+Booking Reference: ${rec.ref}
+Airline Booking Reference (PNR): ${rec.airlineRef || "-"}
+Ticket Number: ${rec.eticket || "-"}
+
+Passenger: ${rec.paxName}
+
+FLIGHT DETAILS
+${segLines}
+
+Baggage Allowance: ${rec.baggage}
+
+Total: ${money(rec.sellPrice, rec.currency)}
+
+IMPORTANT
+• Please carry a valid ID matching the passenger name above.
+• Arrive at the airport at least 3 hours prior to departure.
+• Tickets must be used in the sequence shown above.
+
+We wish you a pleasant journey!
+
+Best regards,
+${co}
+${settings.tagline || ""}
+${settings.phone ? "Tel: " + settings.phone : ""}
+${settings.email ? "Email: " + settings.email : ""}
+${settings.website || ""}
+
+------------------------------------------
+NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sending.`;
+
+    const to = encodeURIComponent(rec.customerEmail || "");
+    const su = encodeURIComponent(subject);
+    const bo = encodeURIComponent(body);
+    // Gmail compose URL — opens a new email ready to send
+    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${su}&body=${bo}`;
+    window.open(gmailUrl, "_blank");
+  };
+
   if (loading) {
     return (
       <div style={{ ...styles.shell, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -301,8 +411,8 @@ export default function App() {
         <div style={styles.brand}>
           <Logo />
           <div>
-            <div style={styles.brandName}>DN TRAVELS</div>
-            <div style={styles.brandTag}>Your Maldivian Connection</div>
+            <div style={styles.brandName}>{settings.companyName || "DN TRAVELS"}</div>
+            <div style={styles.brandTag}>{settings.tagline || "Your Maldivian Connection"}</div>
           </div>
         </div>
         <nav style={styles.nav}>
@@ -318,6 +428,18 @@ export default function App() {
           >
             <History size={16} /> History
             <span style={styles.badge}>{records.length}</span>
+          </button>
+          <button
+            style={{ ...styles.navBtn, ...(tab === "reports" ? styles.navBtnActive : {}) }}
+            onClick={() => { setTab("reports"); setSaved(null); setViewing(null); }}
+          >
+            <BarChart3 size={16} /> Reports
+          </button>
+          <button
+            style={{ ...styles.navBtn, ...(tab === "settings" ? styles.navBtnActive : {}) }}
+            onClick={() => { setTab("settings"); setSaved(null); setViewing(null); }}
+          >
+            <Settings size={16} /> Settings
           </button>
         </nav>
       </header>
@@ -485,6 +607,7 @@ export default function App() {
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <button style={styles.toolBtn} onClick={handlePrint}><Printer size={15} /> Print / Save PDF</button>
+                <button style={styles.emailBtn} onClick={() => emailToCustomer(activeRecord)}><Mail size={15} /> Email Customer</button>
                 <button style={styles.toolBtn} onClick={() => editRecord(activeRecord)}><Edit3 size={15} /> Edit</button>
                 <button
                   style={styles.toolBtnGhost}
@@ -565,6 +688,25 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* ============ REPORTS ============ */}
+        {tab === "reports" && (
+          <ReportsView
+            records={records}
+            reportFrom={reportFrom} setReportFrom={setReportFrom}
+            reportTo={reportTo} setReportTo={setReportTo}
+          />
+        )}
+
+        {/* ============ SETTINGS ============ */}
+        {tab === "settings" && (
+          <SettingsView
+            settings={settings}
+            saveSettings={saveSettings}
+            ratesInfo={ratesInfo}
+            fetchRates={fetchRates}
+          />
+        )}
       </main>
     </div>
   );
@@ -573,20 +715,184 @@ export default function App() {
 // ============================================================
 // Document components
 // ============================================================
+// Holds current settings so document components can read contact details.
+let DOC_SETTINGS = defaultSettings();
+
+// ============================================================
+// Reports
+// ============================================================
+function ReportsView({ records, reportFrom, setReportFrom, reportTo, setReportTo }) {
+  const from = reportFrom ? new Date(reportFrom + "T00:00:00") : null;
+  const to = reportTo ? new Date(reportTo + "T23:59:59") : null;
+  const filtered = records.filter((r) => {
+    const d = new Date(r.issuedAt);
+    if (from && d < from) return false;
+    if (to && d > to) return false;
+    return true;
+  });
+  const revenue = filtered.reduce((a, r) => a + r.sellPrice, 0);
+  const cost = filtered.reduce((a, r) => a + r.basePrice, 0);
+  const profit = filtered.reduce((a, r) => a + r.margin, 0);
+
+  const exportReport = () => {
+    if (filtered.length === 0) { alert("No tickets in this period."); return; }
+    const rows = filtered.map((r) => ({
+      "Booking Ref": r.ref,
+      "Issued": new Date(r.issuedAt).toLocaleString(),
+      "Customer": r.customerName,
+      "Passenger": r.paxName,
+      "Route(s)": r.segments.map((s) => s.route || `${s.depAirport}-${s.arrAirport}`).join(" | "),
+      "Cost (USD)": Number(r.basePrice.toFixed(2)),
+      "Revenue (USD)": Number(r.sellPrice.toFixed(2)),
+      "Profit (USD)": Number(r.margin.toFixed(2)),
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.sheet_add_aoa(ws, [[
+      "TOTALS", "", "", "", "",
+      Number(cost.toFixed(2)), Number(revenue.toFixed(2)), Number(profit.toFixed(2)),
+    ]], { origin: -1 });
+    ws["!cols"] = [{ wch: 14 }, { wch: 20 }, { wch: 22 }, { wch: 22 }, { wch: 28 }, { wch: 12 }, { wch: 13 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new();
+    const label = `${reportFrom || "all"}_to_${reportTo || "now"}`;
+    XLSX.utils.book_append_sheet(wb, ws, "Report");
+    XLSX.writeFile(wb, `DN_Travels_Report_${label}.xlsx`);
+  };
+
+  const quick = (days) => {
+    const t = new Date();
+    const f = new Date(); f.setDate(f.getDate() - days);
+    setReportFrom(f.toISOString().slice(0, 10));
+    setReportTo(t.toISOString().slice(0, 10));
+  };
+
+  return (
+    <div style={{ maxWidth: 880, margin: "0 auto" }}>
+      <div style={styles.card}>
+        <SectionTitle icon={<BarChart3 size={16} />}>Revenue & Profit Report</SectionTitle>
+        <div style={styles.reportRange}>
+          <div style={styles.field}>
+            <label style={styles.label}>From</label>
+            <input type="date" style={styles.input} value={reportFrom} onChange={(e) => setReportFrom(e.target.value)} />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>To</label>
+            <input type="date" style={styles.input} value={reportTo} onChange={(e) => setReportTo(e.target.value)} />
+          </div>
+        </div>
+        <div style={styles.quickRow}>
+          <button style={styles.quickBtn} onClick={() => quick(7)}>Last 7 days</button>
+          <button style={styles.quickBtn} onClick={() => quick(30)}>Last 30 days</button>
+          <button style={styles.quickBtn} onClick={() => quick(90)}>Last 90 days</button>
+          <button style={styles.quickBtn} onClick={() => { setReportFrom(""); setReportTo(""); }}>All time</button>
+        </div>
+
+        <div style={styles.statGrid}>
+          <div style={styles.statBox}>
+            <div style={styles.statLabel}>Tickets</div>
+            <div style={styles.statVal}>{filtered.length}</div>
+          </div>
+          <div style={styles.statBox}>
+            <div style={styles.statLabel}>Revenue (customer paid)</div>
+            <div style={styles.statVal}>${revenue.toFixed(2)}</div>
+          </div>
+          <div style={{ ...styles.statBox, background: "#eafaf1", borderColor: "#bfe8d0" }}>
+            <div style={styles.statLabel}>Profit (your 5%)</div>
+            <div style={{ ...styles.statVal, color: "#1a7a4c" }}>${profit.toFixed(2)}</div>
+          </div>
+        </div>
+        <div style={styles.costNote}>Cost paid to Trip.com in this period: ${cost.toFixed(2)}</div>
+
+        <button style={{ ...styles.excelBtn, marginTop: 18 }} onClick={exportReport}>
+          <Download size={16} /> Export this report to Excel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Settings
+// ============================================================
+function SettingsView({ settings, saveSettings, ratesInfo, fetchRates }) {
+  const [local, setLocal] = useState(settings);
+  const [savedFlash, setSavedFlash] = useState(false);
+  useEffect(() => { setLocal(settings); }, [settings]);
+  const set = (k, v) => setLocal((s) => ({ ...s, [k]: v }));
+  const doSave = () => {
+    saveSettings(local);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1800);
+  };
+
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={styles.card}>
+        <SectionTitle icon={<Settings size={16} />}>Company Details</SectionTitle>
+        <p style={styles.hint}>These appear on your invoices, itineraries, and customer emails.</p>
+        <Field label="Company Name" value={local.companyName} onChange={(v) => set("companyName", v)} />
+        <Field label="Tagline" value={local.tagline} onChange={(v) => set("tagline", v)} />
+        <div style={styles.row}>
+          <Field label="Email" value={local.email} onChange={(v) => set("email", v)} placeholder="info@dntravels.mv" />
+          <Field label="Phone" value={local.phone} onChange={(v) => set("phone", v)} placeholder="+960 …" />
+        </div>
+        <Field label="Address" value={local.address} onChange={(v) => set("address", v)} />
+        <Field label="Website (optional)" value={local.website} onChange={(v) => set("website", v)} placeholder="www.dntravels.mv" />
+      </div>
+
+      <div style={styles.card}>
+        <SectionTitle icon={<RefreshCw size={16} />}>Exchange Rates (per 1 USD)</SectionTitle>
+        <p style={styles.hint}>
+          {ratesInfo.fetchedAt
+            ? `Live rates fetched ${ratesInfo.fetchedAt.toLocaleString()}.`
+            : "Using saved/manual rates."} You can override them below.
+        </p>
+        <label style={{ ...styles.label, display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <input type="checkbox" checked={!!local.autoRates} onChange={(e) => set("autoRates", e.target.checked)} />
+          Auto-fetch live rates on startup
+        </label>
+        <div style={styles.row}>
+          <Field label="1 USD = ? MVR" value={local.ratesMVR} onChange={(v) => set("ratesMVR", v.replace(/[^0-9.]/g, ""))} />
+          <Field label="1 USD = ? LKR" value={local.ratesLKR} onChange={(v) => set("ratesLKR", v.replace(/[^0-9.]/g, ""))} />
+        </div>
+        <button
+          style={{ ...styles.quickBtn, marginTop: 4 }}
+          onClick={async () => { await fetchRates(); }}
+          disabled={ratesInfo.loading}
+        >
+          {ratesInfo.loading ? "Fetching…" : "Fetch live rates now"}
+        </button>
+        {ratesInfo.fetchedAt && (
+          <div style={styles.costNote}>
+            Latest live: 1 USD = {ratesInfo.MVR?.toFixed(2)} MVR · {ratesInfo.LKR?.toFixed(2)} LKR.
+            Click "Fetch live rates now" then Save to use them.
+          </div>
+        )}
+      </div>
+
+      <button style={styles.primaryBtn} onClick={doSave}>
+        <Check size={18} /> {savedFlash ? "Saved!" : "Save Settings"}
+      </button>
+    </div>
+  );
+}
+
 function DocHeader({ subtitle }) {
+  const s = DOC_SETTINGS;
   return (
     <div style={doc.header}>
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
         <Logo size={54} />
         <div>
-          <div style={doc.brandName}>DN TRAVELS</div>
-          <div style={doc.brandTag}>Your Maldivian Connection</div>
+          <div style={doc.brandName}>{s.companyName || "DN TRAVELS"}</div>
+          <div style={doc.brandTag}>{s.tagline || "Your Maldivian Connection"}</div>
         </div>
       </div>
       <div style={{ textAlign: "right" }}>
         <div style={doc.docType}>{subtitle}</div>
-        <div style={doc.contact}>Malé, Republic of Maldives</div>
-        <div style={doc.contact}>info@dntravels.mv</div>
+        {s.address && <div style={doc.contact}>{s.address}</div>}
+        {s.phone && <div style={doc.contact}>{s.phone}</div>}
+        {s.email && <div style={doc.contact}>{s.email}</div>}
+        {s.website && <div style={doc.contact}>{s.website}</div>}
       </div>
     </div>
   );
@@ -850,6 +1156,15 @@ const styles = {
   searchBox: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #d9e6f0", borderRadius: 11, padding: "9px 14px", flex: 1, maxWidth: 380 },
   searchInput: { border: "none", outline: "none", fontFamily: "Manrope, sans-serif", fontSize: 14, flex: 1, background: "transparent" },
   excelBtn: { display: "flex", alignItems: "center", gap: 8, padding: "11px 20px", background: "#1a7a4c", color: "#fff", border: "none", borderRadius: 11, fontWeight: 700, fontSize: 14, cursor: "pointer", boxShadow: "0 3px 10px rgba(26,122,76,.2)" },
+  emailBtn: { display: "flex", alignItems: "center", gap: 7, padding: "10px 16px", background: "#1a7a4c", color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13.5, cursor: "pointer" },
+  reportRange: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
+  quickRow: { display: "flex", gap: 8, flexWrap: "wrap", margin: "4px 0 18px" },
+  quickBtn: { padding: "8px 14px", background: "#fff", border: "1px solid #d9e6f0", borderRadius: 9, fontWeight: 600, fontSize: 13, color: OCEAN, cursor: "pointer" },
+  statGrid: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 6 },
+  statBox: { background: "#f5f9fc", border: "1px solid #e3edf5", borderRadius: 12, padding: "16px 18px" },
+  statLabel: { fontSize: 11.5, fontWeight: 700, color: "#5b7185", textTransform: "uppercase", letterSpacing: .4 },
+  statVal: { fontFamily: "Sora, sans-serif", fontWeight: 800, fontSize: 24, color: NAVY, marginTop: 6 },
+  costNote: { fontSize: 12.5, color: "#8499aa", marginTop: 12 },
   empty: { textAlign: "center", padding: "70px 20px", color: "#8499aa", background: "#fff", borderRadius: 16, border: "1px dashed #d9e6f0" },
   histList: { display: "flex", flexDirection: "column", gap: 10 },
   histRow: { display: "flex", alignItems: "center", gap: 16, background: "#fff", border: "1px solid #e3edf5", borderRadius: 13, padding: "15px 18px", cursor: "pointer", transition: "all .15s" },
