@@ -101,73 +101,60 @@ export default function App() {
   const margin = sellPrice - basePrice;
 
   // ---- Form field updates ----
-  // ---- Import Trip.com PDFs (separate buttons) ----
-  const applyMerged = (merged) => {
+  // ---- Import Trip.com PDFs via AI (Gemini) ----
+  const applyParsed = (p) => {
     setForm((f) => ({
       ...f,
-      customerName: merged.customerName || f.customerName,
-      customerEmail: merged.customerEmail || f.customerEmail,
-      paxName: merged.paxName || f.paxName,
-      eticket: merged.eticket || f.eticket,
-      airlineRef: merged.airlineRef || f.airlineRef,
-      tripComPrice: merged.tripComPrice || f.tripComPrice,
-      segments: merged.segments && merged.segments.length ? merged.segments : f.segments,
+      customerName: p.customerName || f.customerName,
+      customerEmail: p.customerEmail || f.customerEmail,
+      paxName: p.paxName || f.paxName,
+      eticket: p.eticket || f.eticket,
+      airlineRef: p.airlineRef || f.airlineRef,
+      tripComPrice: (p.tripComPrice != null && p.tripComPrice !== 0 && p.tripComPrice !== "")
+        ? String(p.tripComPrice) : f.tripComPrice,
+      segments: (p.segments && p.segments.length)
+        ? p.segments.map((s) => ({ ...blankSegment(), ...s }))
+        : f.segments,
     }));
   };
 
-  const importReceipt = async (fileList) => {
-    const file = (fileList || [])[0];
+  const runImport = async (file, which) => {
     if (!file) return;
-    setImporting("receipt");
+    setImporting(which);
     setImportMsg(null);
     try {
       const text = await readPdfText(file);
-      const r = parseReceipt(text);
-      applyMerged(mergeParsed(r, null));
+      let p;
+      if (which === "receipt") {
+        const r = parseReceipt(text);
+        p = mergeParsed(r, null);
+      } else {
+        const it = parseItinerary(text);
+        p = mergeParsed(null, it);
+      }
+      applyParsed(p);
       const found = [];
-      if (r.customerName) found.push("customer");
-      if (r.paxName) found.push("passenger");
-      if (r.total != null) found.push("price");
+      if (p.customerName) found.push("customer");
+      if (p.paxName) found.push("passenger");
+      if (p.segments && p.segments.length) found.push(`${p.segments.length} flight(s)`);
+      if (p.tripComPrice) found.push("price");
+      if (p.airlineRef) found.push("airline ref");
       setImportMsg({
         ok: found.length > 0,
         text: found.length
-          ? `Receipt read \u2014 got: ${found.join(", ")}.`
-          : "Couldn't find receipt fields. Is this the Trip.com Receipt PDF?",
+          ? `Imported \u2014 got: ${[...new Set(found)].join(", ")}. Please review.`
+          : `Couldn't find details. Is this the Trip.com ${which === "receipt" ? "Receipt" : "Itinerary"} PDF?`,
       });
     } catch (e) {
       console.error(e);
-      setImportMsg({ ok: false, text: "Couldn't read the receipt PDF." });
+      setImportMsg({ ok: false, text: `Couldn't read this PDF. ${e.message || ""}` });
     } finally {
       setImporting(false);
     }
   };
 
-  const importItinerary = async (fileList) => {
-    const file = (fileList || [])[0];
-    if (!file) return;
-    setImporting("itinerary");
-    setImportMsg(null);
-    try {
-      const text = await readPdfText(file);
-      const it = parseItinerary(text);
-      applyMerged(mergeParsed(null, it));
-      const found = [];
-      if (it.segments.length) found.push(`${it.segments.length} flight(s)`);
-      if (it.paxName) found.push("passenger");
-      if (it.airlineRef) found.push("airline ref");
-      setImportMsg({
-        ok: it.segments.length > 0,
-        text: it.segments.length
-          ? `Itinerary read \u2014 got: ${found.join(", ")}.`
-          : "Couldn't find flight details. Is this the Trip.com Itinerary PDF?",
-      });
-    } catch (e) {
-      console.error(e);
-      setImportMsg({ ok: false, text: "Couldn't read the itinerary PDF." });
-    } finally {
-      setImporting(false);
-    }
-  };
+  const importReceipt = (fileList) => runImport((fileList || [])[0], "receipt");
+  const importItinerary = (fileList) => runImport((fileList || [])[0], "itinerary");
 
   // ---- Form field updates ----
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
