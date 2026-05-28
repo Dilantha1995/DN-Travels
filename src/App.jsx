@@ -2,9 +2,10 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Plane, Plus, History, Download, Printer, Trash2, FileText,
   X, Check, Compass, Search, ChevronRight, RefreshCw, Edit3,
-  Upload, FileUp, Loader2, Mail, Settings, BarChart3
+  Upload, FileUp, Loader2, Mail, Settings, BarChart3, FileSignature, Image as ImageIcon
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import html2canvas from "html2canvas";
 import { readPdfText, parseReceipt, parseItinerary, mergeParsed } from "./tripParser";
 
 // ---------- Branding ----------
@@ -34,6 +35,13 @@ function genBookingRef(seq) {
   return `DN${stamp}${pad(seq, 3)}`;
 }
 
+function genQuoteRef(seq) {
+  // QT + YYMMDD + 3-digit sequence
+  const d = new Date();
+  const stamp = `${pad(d.getFullYear() % 100)}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  return `QT${stamp}${pad(seq, 3)}`;
+}
+
 function money(amount, cur) {
   const rate = RATES[cur] || 1;
   const val = amount * rate;
@@ -58,6 +66,18 @@ const blankForm = () => ({
   currency: "USD",
   segments: [blankSegment()],
   baggage: "Checked 25kg • Carry-on 6kg • 1 Personal item",
+  notes: "",
+});
+
+const blankQuote = () => ({
+  customerName: "",
+  customerEmail: "",
+  customerPhone: "",
+  description: "",          // free-text description (optional)
+  costPrice: "",           // your cost (USD); +5% applied
+  validUntil: "",          // optional validity date
+  includeFlights: false,   // show flight segments?
+  segments: [blankSegment()],
   notes: "",
 });
 
@@ -92,6 +112,12 @@ export default function App() {
   const [reportFrom, setReportFrom] = useState("");
   const [reportTo, setReportTo] = useState("");
   const [rateNonce, setRateNonce] = useState(0); // forces re-render when inline rate changes
+  const [quotes, setQuotes] = useState([]);
+  const [quoteSeq, setQuoteSeq] = useState(1);
+  const [quoteForm, setQuoteForm] = useState(blankQuote());
+  const [savedQuote, setSavedQuote] = useState(null);
+  const [viewingQuote, setViewingQuote] = useState(null);
+  const [editingQuoteId, setEditingQuoteId] = useState(null);
 
   // ---- Load persisted data (localStorage) ----
   useEffect(() => {
@@ -101,6 +127,10 @@ export default function App() {
       if (r) setRecords(JSON.parse(r));
       const s = localStorage.getItem("dn_seq");
       if (s) setSeq(parseInt(s, 10));
+      const q = localStorage.getItem("dn_quotes");
+      if (q) setQuotes(JSON.parse(q));
+      const qs = localStorage.getItem("dn_quoteSeq");
+      if (qs) setQuoteSeq(parseInt(qs, 10));
       const st = localStorage.getItem("dn_settings");
       if (st) { loadedSettings = { ...loadedSettings, ...JSON.parse(st) }; setSettings(loadedSettings); }
     } catch (e) {
@@ -325,11 +355,27 @@ export default function App() {
 
   // ---- Print ----
   const printRef = useRef(null);
-  const handlePrint = () => {
-    const node = printRef.current;
+  // ---- Download a document node as PNG image ----
+  const downloadAsImage = async (node, filename) => {
+    if (!node) return;
+    try {
+      const canvas = await html2canvas(node, { scale: 2, backgroundColor: "#ffffff", useCORS: true });
+      const link = document.createElement("a");
+      link.download = `${filename}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch (e) {
+      console.error("Image export failed", e);
+      alert("Couldn't generate image. Try the PDF option instead.");
+    }
+  };
+
+  const printRefQuote = useRef(null);
+
+  const printNode = (node, fileTitle) => {
     if (!node) return;
     const w = window.open("", "_blank");
-    w.document.write(`<!DOCTYPE html><html><head><title>${(viewing||saved).ref}</title>
+    w.document.write(`<!DOCTYPE html><html><head><title>${fileTitle}</title>
       <style>
         @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Manrope:wght@400;500;600;700&display=swap');
         *{box-sizing:border-box;margin:0;padding:0}
@@ -340,7 +386,68 @@ export default function App() {
     setTimeout(() => { w.focus(); w.print(); }, 400);
   };
 
+  const handlePrint = () => {
+    const rec = viewing || saved;
+    const docLabel = docType === "invoice" ? "E-receipt" : "Itinerary";
+    printNode(printRef.current, `${rec.ref} ${docLabel}`);
+  };
+
   const activeRecord = viewing || saved;
+
+  // ---- Quotation handlers ----
+  const quoteBase = parseFloat(quoteForm.costPrice) || 0;
+  const quoteSell = quoteBase * (1 + MARKUP);
+
+  const setQField = (k, v) => setQuoteForm((f) => ({ ...f, [k]: v }));
+  const setQSeg = (i, k, v) => setQuoteForm((f) => {
+    const segs = [...f.segments]; segs[i] = { ...segs[i], [k]: v }; return { ...f, segments: segs };
+  });
+  const addQSeg = () => setQuoteForm((f) => ({ ...f, segments: [...f.segments, blankSegment()] }));
+  const removeQSeg = (i) => setQuoteForm((f) => ({ ...f, segments: f.segments.filter((_, idx) => idx !== i) }));
+
+  const persistQuotes = (list, sq) => {
+    try {
+      localStorage.setItem("dn_quotes", JSON.stringify(list));
+      if (sq != null) localStorage.setItem("dn_quoteSeq", String(sq));
+    } catch (e) { console.error(e); }
+  };
+
+  const issueQuote = () => {
+    if (!quoteForm.customerName.trim() || !quoteBase) {
+      alert("Please enter Customer Name and a Price.");
+      return;
+    }
+    if (editingQuoteId) {
+      const updated = quotes.map((q) => q.id === editingQuoteId
+        ? { ...q, ...quoteForm, basePrice: quoteBase, sellPrice: quoteSell } : q);
+      setQuotes(updated); persistQuotes(updated);
+      setSavedQuote(updated.find((q) => q.id === editingQuoteId));
+      setEditingQuoteId(null); setQuoteForm(blankQuote());
+      return;
+    }
+    const ref = genQuoteRef(quoteSeq);
+    const rec = {
+      id: Date.now(), ref, issuedAt: new Date().toISOString(),
+      ...quoteForm, basePrice: quoteBase, sellPrice: quoteSell,
+    };
+    const list = [rec, ...quotes];
+    const nseq = quoteSeq + 1;
+    setQuotes(list); setQuoteSeq(nseq); persistQuotes(list, nseq);
+    setSavedQuote(rec); setQuoteForm(blankQuote());
+  };
+
+  const editQuote = (q) => {
+    setQuoteForm({ ...blankQuote(), ...q, costPrice: String(q.basePrice) });
+    setEditingQuoteId(q.id); setTab("quote"); setSavedQuote(null); setViewingQuote(null);
+  };
+  const deleteQuote = (id) => {
+    if (!confirm("Delete this quotation?")) return;
+    const list = quotes.filter((q) => q.id !== id);
+    setQuotes(list); persistQuotes(list);
+    if (viewingQuote && viewingQuote.id === id) setViewingQuote(null);
+  };
+
+  const activeQuote = viewingQuote || savedQuote;
 
   // ---- Compose customer email (opens Gmail with body prefilled) ----
   const emailToCustomer = (rec) => {
@@ -408,7 +515,7 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
     <div style={styles.shell}>
       <FontInjector />
       {/* ===== Header ===== */}
-      <header style={styles.header}>
+      <header className="dn-header" style={styles.header}>
         <div style={styles.brand}>
           <Logo />
           <div>
@@ -416,7 +523,7 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
             <div style={styles.brandTag}>{settings.tagline || "Your Maldivian Connection"}</div>
           </div>
         </div>
-        <nav style={styles.nav}>
+        <nav className="dn-nav" style={styles.nav}>
           <button
             style={{ ...styles.navBtn, ...(tab === "new" ? styles.navBtnActive : {}) }}
             onClick={() => { setTab("new"); setViewing(null); }}
@@ -429,6 +536,12 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
           >
             <History size={16} /> History
             <span style={styles.badge}>{records.length}</span>
+          </button>
+          <button
+            style={{ ...styles.navBtn, ...(tab === "quote" ? styles.navBtnActive : {}) }}
+            onClick={() => { setTab("quote"); setSaved(null); setViewing(null); setViewingQuote(null); }}
+          >
+            <FileSignature size={16} /> Quotation
           </button>
           <button
             style={{ ...styles.navBtn, ...(tab === "reports" ? styles.navBtnActive : {}) }}
@@ -448,7 +561,7 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
       <main style={styles.main}>
         {/* ============ NEW TICKET ============ */}
         {tab === "new" && !saved && (
-          <div style={styles.grid}>
+          <div className="dn-grid" style={styles.grid}>
             {/* --- Form --- */}
             <div style={styles.card}>
               <SectionTitle icon={<Edit3 size={16} />}>
@@ -629,8 +742,9 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
                 >Itinerary</button>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button style={styles.toolBtn} onClick={handlePrint}><Printer size={15} /> Print / Save PDF</button>
-                <button style={styles.emailBtn} onClick={() => emailToCustomer(activeRecord)}><Mail size={15} /> Email Customer</button>
+                <button style={styles.toolBtn} onClick={handlePrint}><Printer size={15} /> PDF</button>
+                <button style={styles.toolBtn} onClick={() => downloadAsImage(printRef.current, `${activeRecord.ref} ${docType === "invoice" ? "E-receipt" : "Itinerary"}`)}><ImageIcon size={15} /> Image</button>
+                <button style={styles.emailBtn} onClick={() => emailToCustomer(activeRecord)}><Mail size={15} /> Email</button>
                 <button style={styles.toolBtn} onClick={() => editRecord(activeRecord)}><Edit3 size={15} /> Edit</button>
                 <button
                   style={styles.toolBtnGhost}
@@ -709,6 +823,120 @@ NOTE: Please remember to attach the Itinerary.pdf and E-receipt.pdf before sendi
                   ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ============ QUOTATION ============ */}
+        {tab === "quote" && !savedQuote && !viewingQuote && (
+          <div className="dn-grid" style={styles.grid}>
+            <div style={styles.card}>
+              <SectionTitle icon={<FileSignature size={16} />}>
+                {editingQuoteId ? "Edit Quotation" : "New Quotation"}
+              </SectionTitle>
+              <Group label="Customer Details">
+                <Field label="Customer Name *" value={quoteForm.customerName} onChange={(v) => setQField("customerName", v)} placeholder="Full name" />
+                <Row>
+                  <Field label="Email" value={quoteForm.customerEmail} onChange={(v) => setQField("customerEmail", v)} placeholder="email@example.com" />
+                  <Field label="Phone" value={quoteForm.customerPhone} onChange={(v) => setQField("customerPhone", v)} placeholder="+960 …" />
+                </Row>
+              </Group>
+              <Group label="Quotation Details">
+                <Field label="Description" value={quoteForm.description} onChange={(v) => setQField("description", v)} placeholder="e.g. Return ticket Malé–Colombo, Gulf Air, Economy" />
+                <label style={{ ...styles.label, display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <input type="checkbox" checked={quoteForm.includeFlights} onChange={(e) => setQField("includeFlights", e.target.checked)} />
+                  Include detailed flight segments
+                </label>
+                {quoteForm.includeFlights && quoteForm.segments.map((s, i) => (
+                  <div key={i} style={styles.segBox}>
+                    <div style={styles.segHead}>
+                      <span style={{ fontWeight: 700, color: NAVY, fontSize: 13 }}>Segment {i + 1}</span>
+                      {quoteForm.segments.length > 1 && (
+                        <button style={styles.iconBtnSm} onClick={() => removeQSeg(i)}><X size={14} /></button>
+                      )}
+                    </div>
+                    <Field label="Route" value={s.route} onChange={(v) => setQSeg(i, "route", v)} placeholder="Malé - Colombo" />
+                    <Row>
+                      <Field label="Airline" value={s.airline} onChange={(v) => setQSeg(i, "airline", v)} placeholder="Gulf Air" />
+                      <Field label="Flight No." value={s.flightNo} onChange={(v) => setQSeg(i, "flightNo", v)} placeholder="GF144" />
+                    </Row>
+                    <Row>
+                      <Field label="Dep. Date" value={s.depDate} onChange={(v) => setQSeg(i, "depDate", v)} placeholder="May 29, 2026" />
+                      <Field label="Dep. Time" value={s.depTime} onChange={(v) => setQSeg(i, "depTime", v)} placeholder="07:30" />
+                    </Row>
+                  </div>
+                ))}
+                {quoteForm.includeFlights && (
+                  <button style={styles.addSegBtn} onClick={addQSeg}><Plus size={15} /> Add segment</button>
+                )}
+                <Field label="Valid Until (optional)" value={quoteForm.validUntil} onChange={(v) => setQField("validUntil", v)} placeholder="e.g. June 5, 2026" />
+                <Field label="Notes (optional)" value={quoteForm.notes} onChange={(v) => setQField("notes", v)} />
+              </Group>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+              <div style={styles.card}>
+                <SectionTitle icon={<FileText size={16} />}>Price (auto +5%)</SectionTitle>
+                <Field label="Your cost (USD) *" value={quoteForm.costPrice} onChange={(v) => setQField("costPrice", v.replace(/[^0-9.]/g, ""))} placeholder="268.10" />
+                <div style={styles.priceBreak}>
+                  <PriceLine label="Cost" value={money(quoteBase, "USD")} />
+                  <PriceLine label="Markup (5%)" value={money(quoteSell - quoteBase, "USD")} accent />
+                  <div style={styles.priceDivider} />
+                  <PriceLine label="Quote (USD)" value={money(quoteSell, "USD")} big />
+                  <PriceLine label="Quote (MVR)" value={money(quoteSell, "MVR")} />
+                  <PriceLine label="Quote (LKR)" value={money(quoteSell, "LKR")} />
+                </div>
+                <div style={styles.fxHint}>The quotation shows the price in all three currencies.</div>
+              </div>
+              <button style={styles.primaryBtn} onClick={issueQuote}>
+                <Check size={18} /> {editingQuoteId ? "Update Quotation" : "Generate Quotation"}
+              </button>
+              {editingQuoteId && (
+                <button style={styles.ghostBtn} onClick={() => { setEditingQuoteId(null); setQuoteForm(blankQuote()); }}>Cancel edit</button>
+              )}
+              <p style={styles.hint}>A quote number like <b>{genQuoteRef(quoteSeq)}</b> is generated automatically. Saved to Quotation history below.</p>
+            </div>
+          </div>
+        )}
+
+        {/* Quotation document preview */}
+        {tab === "quote" && activeQuote && (
+          <div>
+            <div style={styles.docToolbar}>
+              <div style={{ fontFamily: "Sora, sans-serif", fontWeight: 700, color: NAVY }}>Quotation {activeQuote.ref}</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button style={styles.toolBtn} onClick={() => printNode(printRefQuote.current, `${activeQuote.ref} Quotation`)}><Printer size={15} /> PDF</button>
+                <button style={styles.toolBtn} onClick={() => downloadAsImage(printRefQuote.current, `${activeQuote.ref} Quotation`)}><ImageIcon size={15} /> Image</button>
+                <button style={styles.toolBtn} onClick={() => editQuote(activeQuote)}><Edit3 size={15} /> Edit</button>
+                <button style={styles.toolBtnGhost} onClick={() => { setSavedQuote(null); setViewingQuote(null); }}><X size={15} /> Close</button>
+              </div>
+            </div>
+            <div style={styles.docWrap}>
+              <div ref={printRefQuote}><Quotation rec={activeQuote} /></div>
+            </div>
+          </div>
+        )}
+
+        {/* Quotation history list */}
+        {tab === "quote" && !savedQuote && !viewingQuote && quotes.length > 0 && (
+          <div style={{ marginTop: 26 }}>
+            <div style={{ fontFamily: "Sora, sans-serif", fontWeight: 700, color: NAVY, marginBottom: 12 }}>Saved Quotations</div>
+            <div style={styles.histList}>
+              {quotes.map((q) => (
+                <div key={q.id} style={styles.histRow} onClick={() => setViewingQuote(q)}>
+                  <div style={{ ...styles.refTag, background: OCEAN }}>{q.ref}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={styles.histName}>{q.customerName}</div>
+                    <div style={styles.histSub}>{q.description || (q.segments && q.segments.map((s) => s.route).filter(Boolean).join(", ")) || "Quotation"}</div>
+                    <div style={styles.histMeta}>{new Date(q.issuedAt).toLocaleDateString()}{q.validUntil ? ` · valid until ${q.validUntil}` : ""}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={styles.histPrice}>{money(q.sellPrice, "USD")}</div>
+                    <div style={styles.histMargin}>{money(q.sellPrice, "MVR")}</div>
+                  </div>
+                  <button style={styles.iconBtnSm} onClick={(e) => { e.stopPropagation(); deleteQuote(q.id); }}><Trash2 size={15} /></button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -809,7 +1037,7 @@ function ReportsView({ records, reportFrom, setReportFrom, reportTo, setReportTo
           <button style={styles.quickBtn} onClick={() => { setReportFrom(""); setReportTo(""); }}>All time</button>
         </div>
 
-        <div style={styles.statGrid}>
+        <div className="dn-report-stats" style={styles.statGrid}>
           <div style={styles.statBox}>
             <div style={styles.statLabel}>Tickets</div>
             <div style={styles.statVal}>{filtered.length}</div>
@@ -902,7 +1130,7 @@ function SettingsView({ settings, saveSettings, ratesInfo, fetchRates }) {
 function DocHeader({ subtitle }) {
   const s = DOC_SETTINGS;
   return (
-    <div style={doc.header}>
+    <div className="dn-doc-header" style={doc.header}>
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
         <Logo size={54} />
         <div>
@@ -924,9 +1152,9 @@ function DocHeader({ subtitle }) {
 function Invoice({ rec }) {
   const c = rec.currency;
   return (
-    <div style={doc.page}>
+    <div className="dn-doc-page" style={doc.page}>
       <DocHeader subtitle="INVOICE" />
-      <div style={doc.metaGrid}>
+      <div className="dn-meta-grid" style={doc.metaGrid}>
         <div>
           <div style={doc.metaLabel}>Billed To</div>
           <div style={doc.metaStrong}>{rec.customerName}</div>
@@ -987,7 +1215,7 @@ function Invoice({ rec }) {
 
 function Itinerary({ rec }) {
   return (
-    <div style={doc.page}>
+    <div className="dn-doc-page" style={doc.page}>
       <DocHeader subtitle="ITINERARY" />
       <div style={doc.itinTop}>
         <div>
@@ -1044,6 +1272,64 @@ function Itinerary({ rec }) {
 // ============================================================
 // Small UI pieces
 // ============================================================
+function Quotation({ rec }) {
+  return (
+    <div className="dn-doc-page" style={doc.page}>
+      <DocHeader subtitle="QUOTATION" />
+      <div className="dn-meta-grid" style={doc.metaGrid}>
+        <div>
+          <div style={doc.metaLabel}>Prepared For</div>
+          <div style={doc.metaStrong}>{rec.customerName}</div>
+          {rec.customerEmail && <div style={doc.metaLine}>{rec.customerEmail}</div>}
+          {rec.customerPhone && <div style={doc.metaLine}>{rec.customerPhone}</div>}
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={doc.metaLabel}>Quotation No.</div>
+          <div style={doc.refBig}>{rec.ref}</div>
+          <div style={doc.metaLine}>Date: {new Date(rec.issuedAt).toLocaleDateString()}</div>
+          {rec.validUntil && <div style={doc.metaLine}>Valid until: {rec.validUntil}</div>}
+        </div>
+      </div>
+
+      <table style={doc.table}>
+        <thead>
+          <tr><th style={{ ...doc.th, textAlign: "left" }}>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style={doc.td}>
+              {rec.description && <div style={{ marginBottom: rec.includeFlights ? 10 : 0 }}>{rec.description}</div>}
+              {rec.includeFlights && rec.segments.filter((s) => s.route || s.flightNo).map((s, i) => (
+                <div key={i} style={{ fontSize: 13, color: "#33485c", marginBottom: 6 }}>
+                  <b>{s.route || `${s.depAirport} → ${s.arrAirport}`}</b>
+                  {(s.airline || s.flightNo) && <span style={{ color: "#5b7185" }}> — {s.airline} {s.flightNo}</span>}
+                  {(s.depDate || s.depTime) && <span style={{ color: "#5b7185" }}> · {s.depDate} {s.depTime}</span>}
+                </div>
+              ))}
+              {!rec.description && !rec.includeFlights && <span style={{ color: "#9aaabb" }}>Air ticket quotation</span>}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div style={doc.totalsWrap}>
+        <div style={{ width: 320 }}>
+          <div style={doc.totalRow}><span>Price (USD)</span><span style={{ fontWeight: 700, color: NAVY }}>{money(rec.sellPrice, "USD")}</span></div>
+          <div style={doc.totalRow}><span>Price (MVR)</span><span style={{ fontWeight: 700, color: NAVY }}>{money(rec.sellPrice, "MVR")}</span></div>
+          <div style={{ ...doc.totalRow, ...doc.grandTotal }}><span>Price (LKR)</span><span>{money(rec.sellPrice, "LKR")}</span></div>
+        </div>
+      </div>
+      <div style={doc.fxLine}>Currency conversions are indicative and based on current exchange rates.</div>
+
+      {rec.notes && <div style={doc.notes}><b>Notes: </b>{rec.notes}</div>}
+      <div style={doc.footer}>
+        This is a quotation only and does not constitute a confirmed booking.<br />
+        Please contact us to confirm and issue your ticket. Thank you for considering DN Travels.
+      </div>
+    </div>
+  );
+}
+
 function Logo({ size = 44 }) {
   return (
     <div style={{ width: size, height: size, flexShrink: 0 }}>
@@ -1105,6 +1391,16 @@ function FontInjector() {
       @keyframes sp { to { transform: rotate(360deg); } }
       ::-webkit-scrollbar { width: 9px; height: 9px; }
       ::-webkit-scrollbar-thumb { background: #c5d6e4; border-radius: 6px; }
+      @media (max-width: 760px) {
+        .dn-grid { grid-template-columns: 1fr !important; }
+        .dn-doc-page { width: 100% !important; padding: 22px 16px !important; }
+        .dn-header { flex-direction: column; align-items: flex-start !important; gap: 12px; }
+        .dn-nav { width: 100%; overflow-x: auto; flex-wrap: nowrap !important; }
+        .dn-nav button { white-space: nowrap; }
+        .dn-doc-header { flex-direction: column; gap: 12px; }
+        .dn-meta-grid { flex-direction: column; gap: 14px; }
+        .dn-report-stats { grid-template-columns: 1fr !important; }
+      }
     `}</style>
   );
 }
@@ -1224,6 +1520,7 @@ const doc = {
   totalRow: { display: "flex", justifyContent: "space-between", padding: "8px 4px", fontSize: 14, color: "#5b7185" },
   grandTotal: { borderTop: `2px solid ${NAVY}`, marginTop: 4, paddingTop: 12, fontFamily: "Sora, sans-serif", fontWeight: 800, fontSize: 18, color: NAVY },
   notes: { marginTop: 22, padding: "12px 16px", background: "#f5f9fc", borderRadius: 8, fontSize: 12.5, color: "#5b7185" },
+  fxLine: { fontSize: 11, color: "#9aaabb", marginTop: 8, textAlign: "right" },
   footer: { marginTop: 30, paddingTop: 16, borderTop: "1px solid #eef3f8", textAlign: "center", fontSize: 11.5, color: "#9aaabb", lineHeight: 1.6 },
   itinTop: { display: "flex", justifyContent: "space-between", marginBottom: 22 },
   flightCard: { border: "1px solid #e3edf5", borderRadius: 12, marginBottom: 14, overflow: "hidden" },
